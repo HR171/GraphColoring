@@ -1,7 +1,6 @@
 import networkx as nx
 import os
 import time
-import random
 from dataclasses import dataclass
 
 # ------------ Instancias conocidas ------------
@@ -40,9 +39,11 @@ def load_col_file(path: str) -> nx.Graph:
     return G
 
 # ------------ Algoritmos de coloreo ------------
-color_names = ["Red", "Green", "Blue", "Yellow", "Orange", "Purple", "Pink", "Brown", "Gray", "Cyan"]
+color_names = [
+    "Red", "Green", "Blue", "Yellow", "Orange", "Purple",
+    "Pink", "Brown", "Gray", "Cyan"
+]
 
-# ------------ Greedy Coloring ------------
 def greedy_coloring(G: nx.Graph) -> tuple[dict, set]:
     nodes_sorted = sorted(G.nodes(), key=lambda node: G.degree(node), reverse=True)
     color_map = {}
@@ -65,7 +66,7 @@ def greedy_coloring(G: nx.Graph) -> tuple[dict, set]:
 
     return color_map, used_colors
 
-# ------------ Local Search ------------
+# ------------ Búsqueda local ------------
 def local_search_first_improvement(G, color_map, max_iterations=100000):
     improvement_found = False
     for _ in range(max_iterations):
@@ -81,41 +82,91 @@ def local_search_first_improvement(G, color_map, max_iterations=100000):
                 if candidate_color not in neighbor_colors:
                     color_map[node] = candidate_color
                     improvement_found = True
-                    break  # primera mejora para este nodo
+                    break
 
             if improvement_found:
-                break  # reiniciar búsqueda desde el primer nodo
+                break
 
-        # Verificar si ya no hay mejora
         new_used_colors = {color_map[n] for n in G.nodes()}
         if not improvement_found or len(new_used_colors) >= len(used_colors):
             break
 
     return color_map, improvement_found
 
+# ------------ Validación de coloreo ------------
+def validate_coloring(G: nx.Graph, color_map: dict) -> bool:
+    """
+    Verifica que ningún par de nodos adyacentes comparta el mismo color.
+    """
+    # Todos los nodos deben estar coloreados
+    if set(color_map.keys()) != set(G.nodes()):
+        return False
+    # Ninguna arista conecta dos nodos con mismo color
+    for u, v in G.edges():
+        if color_map.get(u) == color_map.get(v):
+            return False
+    return True
+
+# ------------ Backtracking con poda ------------
+def backtracking_coloring(G: nx.Graph, max_colors: int) -> tuple[dict, float]:
+    nodes = list(G.nodes())
+    color_map = {}
+    start = time.time()
+
+    def is_valid(node, color):
+        return all(color_map.get(neigh) != color for neigh in G.neighbors(node))
+
+    def solve(index):
+        if index == len(nodes):
+            return True
+        for c in range(max_colors):
+            if is_valid(nodes[index], c):
+                color_map[nodes[index]] = c
+                if solve(index + 1):
+                    return True
+                del color_map[nodes[index]]
+        return False
+
+    for k in range(1, max_colors + 1):
+        color_map.clear()
+        if solve(0):
+            elapsed = time.time() - start
+            named_map = {n: f"Color-{color_map[n]}" for n in color_map}
+            return named_map, elapsed
+
+    return {}, time.time() - start
+
 # ------------ Configuración ------------
 @dataclass
 class Config:
     use_greedy: bool = True
-    use_local: bool = True  # Asegúrate de que esta opción esté activa si se quiere usar el algoritmo local
+    use_local: bool = True
+    use_backtracking: bool = True
     time_enabled: bool = False
 
-# ------------ Solver ------------
+# ------------ Solver con validación ------------
 class GraphColoringSolver:
     def __init__(self, config: Config):
         self.cfg = config
 
     def greedy(self, G):
         start = time.time()
-        coloring, colors = greedy_coloring(G)
+        cmap, colors = greedy_coloring(G)
         elapsed = time.time() - start
-        return coloring, len(colors), elapsed
+        print(f"Greedy valid: {validate_coloring(G, cmap)}")
+        return cmap, len(colors), elapsed
 
     def local(self, G, init_coloring):
         start = time.time()
         result, improved = local_search_first_improvement(G, init_coloring)
         elapsed = time.time() - start
+        print(f"Local valid: {validate_coloring(G, result)}")
         return result, len(set(result.values())), improved, elapsed
+
+    def backtracking(self, G, max_colors):
+        result, elapsed = backtracking_coloring(G, max_colors=max_colors)
+        print(f"Backtracking valid: {validate_coloring(G, result)}")
+        return result, len(set(result.values())), elapsed
 
 # ------------ Benchmark ------------
 class GraphColoringBenchmark:
@@ -124,10 +175,20 @@ class GraphColoringBenchmark:
         self.solver = GraphColoringSolver(config)
 
     def run_all(self, folder: str):
+        backtrack_files = {
+            "queen6_6.col",
+            "queen7_7.col",
+            "queen8_8.col",
+            "queen8_12.col",
+            "queen11_11.col",
+        }
+
         cols = ['Instance']
         if self.cfg.use_greedy: cols += ['Greedy' + (' (t)' if self.cfg.time_enabled else '')]
         if self.cfg.use_local:  cols += ['Local'  + (' (t)' if self.cfg.time_enabled else ''), 'Local Improved']
+        if self.cfg.use_backtracking: cols += ['Backtrack (t)']
         cols += ['Optimal']
+
         print("  ".join(f"{c:<16}" for c in cols))
         print('-' * (len(cols) * 14))
 
@@ -137,7 +198,6 @@ class GraphColoringBenchmark:
             opt = BEST_KNOWN_COLORS.get(fname)
             row = [fname]
 
-            # Ejecutar algoritmo Greedy
             if self.cfg.use_greedy:
                 cmap_g, g_cnt, g_t = self.solver.greedy(G)
                 row.append(f"{g_cnt}{f' ({g_t:.3f}s)' if self.cfg.time_enabled else ''}")
@@ -145,22 +205,24 @@ class GraphColoringBenchmark:
             else:
                 base_map = {}
 
-            # Ejecutar algoritmo Local y comparar
             if self.cfg.use_local:
                 cmap_l, cmap_cnt, local_improved, l_t = self.solver.local(G, base_map)
                 row.append(f"{cmap_cnt}{f' ({l_t:.3f}s)' if self.cfg.time_enabled else ''}")
+                row.append("Yes" if local_improved and cmap_cnt < g_cnt else "No")
+                base_map = cmap_l if local_improved else base_map
 
-                # Comparar si la búsqueda local mejoró el resultado del Greedy
-                if local_improved and cmap_cnt < g_cnt:
-                    row.append("Yes")
-                else:
-                    row.append("No")
+            if self.cfg.use_backtracking and fname in backtrack_files:
+                max_colors = len(set(base_map.values())) if base_map else len(G.nodes())
+                cmap_bt, bt_cnt, bt_t = self.solver.backtracking(G, max_colors=max_colors)
+                row.append(f"{bt_cnt}{f' ({bt_t:.3f}s)' if self.cfg.time_enabled else ''}")
+            elif self.cfg.use_backtracking:
+                row.append("Skipped")
 
             row.append(str(opt) if opt is not None else "?")
             print("  ".join(f"{r:<16}" for r in row))
 
 # ------------ Uso ------------
 if __name__ == '__main__':
-    cfg = Config(use_greedy=True, use_local=True, time_enabled=True)
+    cfg = Config(use_greedy=True, use_local=True, use_backtracking=True, time_enabled=True)
     bench = GraphColoringBenchmark(cfg)
     bench.run_all('DIMACS')
